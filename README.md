@@ -28,7 +28,7 @@ on:
 
 jobs:
   build:
-    uses: hygeos/reusable-workflows/.github/workflows/pypi_build.yml@main
+    uses: hygeos/reusable-workflows/.github/workflows/pypi_build.yml@v1
 
   publish:
     needs: build
@@ -80,7 +80,7 @@ on:
 
 jobs:
   release:
-    uses: hygeos/reusable-workflows/.github/workflows/github_release.yml@main
+    uses: hygeos/reusable-workflows/.github/workflows/github_release.yml@v1
     permissions:
       contents: write
 ```
@@ -157,6 +157,15 @@ auto-generated notes.
 
 ## Versioning
 
-Callers currently reference `@main`. Once the workflows are stable, tag a
-release here (e.g. `v1`) and pin callers to it (`...@v1`) so that later
-changes cannot break existing projects.
+Callers reference the major-version tag `v1`, which is a *moving* tag (like
+`actions/checkout@v4`): after a backward-compatible fix on `main`, re-point it
+so that all projects pick the fix up on their next run:
+
+```bash
+git tag -f v1
+git push -f origin v1
+```
+
+For a breaking change (renamed input/output, artifact name, required setup),
+tag `v2` instead and let projects switch to `...@v2` explicitly, so that
+existing callers keep working on `v1`.
