@@ -1,0 +1,109 @@
+# Reusable workflow: publish a GitHub release (or pre-release) for a pushed
+# version tag.
+#
+# Meant to be called from a project's own workflow on a version tag push,
+# including pre-release tags (e.g. v1.0.3, v1.0.3dev1, v1.0.3rc2). It checks
+# that the tagged commit is on the main (or master) branch, then publishes:
+#   - a release for plain vX.Y.Z tags,
+#   - a pre-release for any suffixed tag (dev, rc, ...).
+#
+# If the changelog file (CHANGELOG.md at the repo root by default) has a
+# "## <tag>" section (e.g. "## v1.0.3"), its content becomes the release
+# description; otherwise GitHub's auto-generated notes are used and a warning
+# is emitted.
+#
+# The calling job must grant the token write access to repository contents:
+#   permissions:
+#     contents: write
+
+name: GitHub Release
+
+on:
+  workflow_call:
+    inputs:
+      changelog-file:
+        description: Path to the changelog file, relative to the repo root
+        type: string
+        required: false
+        default: "CHANGELOG.md"
+
+jobs:
+  release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history + all branches, needed for the ancestry check
+
+      # A tag push event does not know which branch the commit came from, so
+      # check that the tagged commit is an ancestor of main (or master).
+      # GITHUB_SHA is peeled with ^{commit} because for annotated tags it
+      # points to the tag object, not the commit.
+      - name: Verify tag is on main or master
+        run: |
+          commit=$(git rev-parse "${GITHUB_SHA}^{commit}")
+          if git merge-base --is-ancestor "$commit" origin/main 2>/dev/null || \
+             git merge-base --is-ancestor "$commit" origin/master 2>/dev/null; then
+            echo "Tag $GITHUB_REF_NAME is on the default branch. Proceeding."
+          else
+            echo "::error::Tag $GITHUB_REF_NAME is not on main/master. Aborting."
+            exit 1
+          fi
+
+      # Plain vX.Y.Z tags are releases; any suffixed tag (v1.0.0dev1,
+      # v1.0.0rc2, ...) is a pre-release.
+      - name: Classify tag as release or pre-release
+        id: classify
+        run: |
+          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $GITHUB_REF_NAME is a release."
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $GITHUB_REF_NAME is a pre-release."
+          fi
+
+      # Extract the changelog section for this tag: everything between the
+      # "## <tag>" heading and the next "## " heading, with surrounding blank
+      # lines trimmed.
+      - name: Extract release notes from the changelog
+        id: notes
+        run: |
+          notes_file="$RUNNER_TEMP/release_notes.md"
+          if [ -f "${{ inputs.changelog-file }}" ]; then
+            awk -v tag="$GITHUB_REF_NAME" '
+              !found && $0 ~ "^## " tag "([[:space:]]|$)" {found=1; next}
+              found && /^## / {exit}
+              found {print}
+            ' "${{ inputs.changelog-file }}" \
+              | sed -e '/./,$!d' -e :a -e '/^\n*$/{$d;N;ba' -e '}' > "$notes_file"
+          else
+            : > "$notes_file"
+          fi
+          if [ -s "$notes_file" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Using the '## $GITHUB_REF_NAME' section of ${{ inputs.changelog-file }}."
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No '## $GITHUB_REF_NAME' section found in ${{ inputs.changelog-file }}. Falling back to auto-generated release notes."
+          fi
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--verify-tag --title "$GITHUB_REF_NAME")
+          if [ "${{ steps.classify.outputs.prerelease }}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          if [ "${{ steps.notes.outputs.found }}" = "true" ]; then
+            args+=(--notes-file "$RUNNER_TEMP/release_notes.md")
+          else
+            args+=(--generate-notes)
+          fi
+          gh release create "$GITHUB_REF_NAME" "${args[@]}"
