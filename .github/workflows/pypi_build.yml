@@ -1,23 +1,33 @@
-# Publish to PyPI when a version tag (e.g. v1.0.3) is pushed, provided the
-# tagged commit is on the main (or master) branch.
+# Reusable workflow: build a Python package and verify it is ready to publish.
 #
-# Prerequisites (one-time, per repository):
-#   - Create the "pypi" environment in the repo Settings > Environments.
-#   - Configure a Trusted Publisher on pypi.org for the project
-#     (PyPI project Settings > Publishing > Add a new publisher) with:
-#     owner = <org/user>, repo = <repo>, workflow = push_pypi.yml, environment = pypi
+# Meant to be called from a project's own workflow on a version tag push
+# (e.g. v1.0.3). It checks that the tagged commit is on the main (or master)
+# branch and that the tag matches the version in pyproject.toml, then builds
+# the sdist + wheel and uploads them as the "python-package-distributions"
+# artifact for the caller's publish job to download.
+#
+# The publish job itself must stay in the calling repository: PyPI Trusted
+# Publishing does not accept a publish job running inside a reusable workflow
+# from another repository (https://github.com/pypi/warehouse/issues/11096).
+# See the README for the caller template and per-project prerequisites.
 #
 # Assumes the project name and version are declared statically under [project]
 # in pyproject.toml (the PyPI project name may differ from the repository name).
 
-name: Publish to PyPI
+name: Build PyPI package
 
-# The tag filter uses + (one or more digits) so that pre-release tags such as
-# v1.0.0dev1 or v1.0.0rc1 do not trigger a publish.
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version used to build the package
+        type: string
+        required: false
+        default: "3.12"
+    outputs:
+      package-name:
+        description: Project name read from pyproject.toml
+        value: ${{ jobs.build.outputs.package-name }}
 
 jobs:
   build:
@@ -51,7 +61,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ inputs.python-version }}
 
       - name: Verify tag matches the package version
         id: metadata
@@ -76,27 +86,3 @@ jobs:
           name: python-package-distributions
           path: dist/
           retention-days: 1
-
-  publish:
-    name: Publish to PyPI
-    needs: build
-    runs-on: ubuntu-latest
-
-    # The "pypi" environment enables Trusted Publishing (OIDC): no API token
-    # to store in the repo. id-token: write lets GitHub mint the OIDC token
-    # that PyPI validates.
-    environment:
-      name: pypi
-      url: https://pypi.org/p/${{ needs.build.outputs.package-name }}
-    permissions:
-      id-token: write
-
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: python-package-distributions
-          path: dist/
-
-      - name: Publish to PyPI (Trusted Publishing)
-        uses: pypa/gh-action-pypi-publish@release/v1
