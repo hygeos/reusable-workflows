@@ -12,32 +12,9 @@ Available workflows:
 - [`github_release.yml`](#github_releaseyml--publish-a-github-release-on-tag-push) —
   publish a GitHub release or pre-release on version tag push
 
-## `pypi_build.yml` — build and verify a Python package
+## Setting up a project
 
-Called on a version tag push (e.g. `v1.0.3`), it:
-
-1. checks that the tagged commit is on the `main` (or `master`) branch;
-2. checks that the tag matches the `version` declared under `[project]` in
-   `pyproject.toml` (which must be static, along with `name`);
-3. builds the sdist + wheel with `python -m build`;
-4. uploads `dist/` as the `python-package-distributions` artifact (1 day
-   retention) for the caller's publish job.
-
-| Input | Default | Description |
-|---|---|---|
-| `python-version` | `"3.12"` | Python version used to build the package |
-
-| Output | Description |
-|---|---|
-| `package-name` | Project name read from `pyproject.toml` |
-
-**Why doesn't it publish too?** PyPI Trusted Publishing requires the publish
-job to run in a workflow file belonging to the publishing repository itself —
-it rejects publish jobs running inside a reusable workflow from another
-repository ([pypi/warehouse#11096](https://github.com/pypi/warehouse/issues/11096)).
-So the short publish job stays in each project.
-
-### Using it from a project
+### PyPI publishing
 
 Save this as `.github/workflows/push_pypi.yml` in the project:
 
@@ -75,9 +52,13 @@ jobs:
 The tag filter uses `+` (one or more digits) so that pre-release tags such as
 `v1.0.0dev1` or `v1.0.0rc1` do not trigger a publish.
 
-### One-time prerequisites (per project)
+**Migrating from the old standalone `push_pypi.yml`:** replace the whole
+content of the file with the caller above. Keep the filename: it is the one
+registered in the PyPI Trusted Publisher configuration, so nothing needs to
+change on pypi.org or in the repo's environments.
 
-Unchanged from the previous standalone workflow:
+**One-time prerequisites** (per project, unchanged from the previous
+standalone workflow):
 
 - Create the `pypi` environment in the repo Settings > Environments.
 - Configure a Trusted Publisher on pypi.org for the project (PyPI project
@@ -85,32 +66,7 @@ Unchanged from the previous standalone workflow:
   owner = `<org/user>`, repo = `<repo>`, workflow = `push_pypi.yml`,
   environment = `pypi`.
 
-### Migrating a project that has the old standalone `push_pypi.yml`
-
-Replace the whole content of its `.github/workflows/push_pypi.yml` with the
-caller above. Keep the filename: it is the one registered in the PyPI Trusted
-Publisher configuration, so nothing needs to change on pypi.org or in the
-repo's environments.
-
-## `github_release.yml` — publish a GitHub release on tag push
-
-Called on a version tag push — including pre-release tags — it:
-
-1. checks that the tagged commit is on the `main` (or `master`) branch;
-2. classifies the tag: plain `vX.Y.Z` tags become **releases**, suffixed tags
-   such as `v0.2.0dev1` or `v1.0.0rc1` become **pre-releases**;
-3. publishes the GitHub release, using as description the tag's section from
-   the changelog when available (see format below), otherwise GitHub's
-   auto-generated notes (with a workflow warning).
-
-| Input | Default | Description |
-|---|---|---|
-| `changelog-file` | `"CHANGELOG.md"` | Path to the changelog file, relative to the repo root |
-
-Unlike PyPI publishing, the whole job runs inside the reusable workflow (the
-`GITHUB_TOKEN` is available to it), so the caller is minimal.
-
-### Using it from a project
+### GitHub releases
 
 Save this as `.github/workflows/github_release.yml` in the project:
 
@@ -132,7 +88,57 @@ jobs:
 `permissions: contents: write` on the calling job is required to create the
 release, since the default token permissions may be read-only.
 
-### Changelog format
+No other setup is needed. For the release description to be taken from the
+project's `CHANGELOG.md`, follow the
+[expected changelog format](#changelog-format); otherwise GitHub's
+auto-generated notes are used.
+
+## Workflow reference
+
+### `pypi_build.yml` — build and verify a Python package
+
+Called on a version tag push (e.g. `v1.0.3`), it:
+
+1. checks that the tagged commit is on the `main` (or `master`) branch;
+2. checks that the tag matches the `version` declared under `[project]` in
+   `pyproject.toml` (which must be static, along with `name`);
+3. builds the sdist + wheel with `python -m build`;
+4. uploads `dist/` as the `python-package-distributions` artifact (1 day
+   retention) for the caller's publish job.
+
+| Input | Default | Description |
+|---|---|---|
+| `python-version` | `"3.12"` | Python version used to build the package |
+
+| Output | Description |
+|---|---|
+| `package-name` | Project name read from `pyproject.toml` |
+
+**Why doesn't it publish too?** PyPI Trusted Publishing requires the publish
+job to run in a workflow file belonging to the publishing repository itself —
+it rejects publish jobs running inside a reusable workflow from another
+repository ([pypi/warehouse#11096](https://github.com/pypi/warehouse/issues/11096)).
+So the short publish job stays in each project.
+
+### `github_release.yml` — publish a GitHub release on tag push
+
+Called on a version tag push — including pre-release tags — it:
+
+1. checks that the tagged commit is on the `main` (or `master`) branch;
+2. classifies the tag: plain `vX.Y.Z` tags become **releases**, suffixed tags
+   such as `v0.2.0dev1` or `v1.0.0rc1` become **pre-releases**;
+3. publishes the GitHub release, using as description the tag's section from
+   the changelog when available (see format below), otherwise GitHub's
+   auto-generated notes (with a workflow warning).
+
+| Input | Default | Description |
+|---|---|---|
+| `changelog-file` | `"CHANGELOG.md"` | Path to the changelog file, relative to the repo root |
+
+Unlike PyPI publishing, the whole job runs inside the reusable workflow (the
+`GITHUB_TOKEN` is available to it), so the caller is minimal.
+
+#### Changelog format
 
 The description is taken from the section whose heading matches the tag name
 exactly, i.e. `## <tag>` (`v` prefix included), up to the next `## ` heading —
