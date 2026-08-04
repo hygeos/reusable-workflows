@@ -13,6 +13,8 @@ Available workflows:
   publish a GitHub release or pre-release on version tag push
 - [`tests.yml`](#testsyml--run-the-project-test-suite) —
   run the project test suite on its supported Python range
+- [`docs_github_pages.yml`](#docs_github_pagesyml--build-and-publish-sphinx-docs) —
+  build the Sphinx docs and publish them to GitHub Pages
 
 ## Setting up a project
 
@@ -123,6 +125,34 @@ invisible to CI):
 markers = ["gpu: tests requiring a GPU (skipped in CI)"]
 ```
 
+### Docs (GitHub Pages)
+
+Save this as `.github/workflows/docs_github_pages.yml` in the project:
+
+```yaml
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  docs:
+    uses: hygeos/reusable-workflows/.github/workflows/docs_github_pages.yml@v1
+    permissions:
+      contents: write
+```
+
+`permissions: contents: write` is required to push the built HTML to the
+`gh-pages` branch. On pull requests the docs are built as a check but not
+published; publication happens when the change reaches `main`.
+
+**One-time prerequisite** (per project): in the repo Settings > Pages, set the
+source to "Deploy from a branch" with branch `gh-pages` / `/ (root)` (the
+branch is created by the first publishing run).
+
 ## Workflow reference
 
 ### `pypi_build.yml` — build and verify a Python package
@@ -212,6 +242,44 @@ and the workspace `platforms` must include `linux-64`. The committed
 `pixi add "python==3.X.*"` and re-solves the environment, so both ends of the
 declared support range are actually tested — a failure on the minimum version
 usually means the declared range is stale.
+
+### `docs_github_pages.yml` — build and publish Sphinx docs
+
+Called on push / pull_request / workflow_dispatch, it:
+
+1. detects the environment manager (same rule as `tests.yml`): **pixi** when
+   `pyproject.toml` has a `[tool.pixi]` section (or a `pixi.toml` exists),
+   otherwise **pip/uv** installing the project with its docs extras;
+2. detects the Sphinx source directory: `docs/conf.py`, else
+   `docs/source/conf.py`, else fails asking for the `docs-source` input;
+3. picks the pixi environment: `docs` when declared in
+   `[tool.pixi.environments]`, otherwise `default`;
+4. if `<docs-source>/_notebooks/*.py` jupytext percent scripts exist, converts
+   them to notebooks, moves them into the Sphinx source directory and executes
+   them in the build environment;
+5. builds on a matrix: with pixi, once against the committed `pixi.lock`
+   ("locked") plus fresh solves pinned at the min and max supported Python;
+   with uv, at min and max Python (version range derived as in `tests.yml` —
+   a min-version failure usually means the declared range is stale);
+6. runs `sphinx-build -b html` directly (any `docs/Makefile` is bypassed);
+7. publishes with `ghp-import -n -p -f` to the `gh-pages` branch, from the
+   canonical matrix entry only (pixi "locked" / uv max Python) and never on
+   `pull_request` events.
+
+| Input | Default | Description |
+|---|---|---|
+| `docs-source` | `""` | Sphinx source directory containing `conf.py` (empty = auto-detect `docs` or `docs/source`) |
+| `extras` | `"docs"` | Comma-separated extras installed on the pip/uv path (ignored with pixi) |
+| `pixi-environment` | `""` | Pixi environment for the build (empty = `docs` if declared, else `default`) |
+| `publish` | `true` | Publish to GitHub Pages from the canonical build |
+
+Notes: projects using `nbsphinx` need the pandoc *binary* — the workflow
+apt-installs it on the runner, so no project setup is needed (conda pandoc in
+a pixi environment also works and is harmless duplication). Notebook execution
+needs a Jupyter kernel: make sure `ipykernel` is reachable from the docs
+environment (add it to the `docs` extra rather than relying on transitive
+installs). Overlapping publishing runs force-push `gh-pages` and the last one
+wins; add a `concurrency` group in the caller if that ever matters.
 
 ## Versioning
 
