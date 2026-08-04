@@ -257,13 +257,11 @@ Called on push / pull_request / workflow_dispatch, it:
 4. if `<docs-source>/_notebooks/*.py` jupytext percent scripts exist, converts
    them to notebooks, moves them into the Sphinx source directory and executes
    them in the build environment;
-5. builds on a matrix: with pixi, once against the committed `pixi.lock`
-   ("locked") plus fresh solves pinned at the min and max supported Python;
-   with uv, at min and max Python (version range derived as in `tests.yml` —
-   a min-version failure usually means the declared range is stale);
+5. builds once: with pixi, in the environment installed from the committed
+   `pixi.lock` (cached); with uv, on the `python-version` input — testing the
+   supported Python range is the job of the tests workflow, not this one;
 6. runs `sphinx-build -b html` directly (any `docs/Makefile` is bypassed);
-7. publishes with `ghp-import -n -p -f` to the `gh-pages` branch, from the
-   canonical matrix entry only (pixi "locked" / uv max Python) and never on
+7. publishes with `ghp-import -n -p -f` to the `gh-pages` branch, never on
    `pull_request` events.
 
 | Input | Default | Description |
@@ -271,7 +269,8 @@ Called on push / pull_request / workflow_dispatch, it:
 | `docs-source` | `""` | Sphinx source directory containing `conf.py` (empty = auto-detect `docs` or `docs/source`) |
 | `extras` | `"docs"` | Comma-separated extras installed on the pip/uv path (ignored with pixi) |
 | `pixi-environment` | `""` | Pixi environment for the build (empty = `docs` if declared, else `default`) |
-| `publish` | `true` | Publish to GitHub Pages from the canonical build |
+| `python-version` | `"3.13"` | Python version on the pip/uv path (ignored with pixi, which uses its lock) |
+| `publish` | `true` | Publish to GitHub Pages |
 
 Notes: projects using `nbsphinx` need the pandoc *binary* — the workflow
 apt-installs it on the runner, so no project setup is needed (conda pandoc in

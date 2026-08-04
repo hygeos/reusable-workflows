@@ -15,18 +15,15 @@
 #     exist, they are converted to notebooks, moved into the Sphinx source
 #     directory and executed in the build environment before the build.
 #
-# Build matrix: with pixi, the docs are built once against the committed
-# pixi.lock ("locked") plus once per fresh solve pinned at the min and max
-# supported Python; with uv, once per min and max Python. The supported range
-# comes from the "Programming Language :: Python :: 3.X" classifiers with a
-# fallback on the requires-python bounds (same derivation as tests.yml).
+# The docs are built once: with pixi, in the environment installed from the
+# committed pixi.lock (cached); with uv, on the python-version input. Testing
+# the supported Python range is the job of the tests workflow, not this one.
 #
 # sphinx-build is invoked directly (any docs/Makefile is bypassed) with the
 # HTML written to $RUNNER_TEMP/docs_html, so the output location is uniform
 # across projects. Publishing runs ghp-import, which force-pushes the HTML to
-# the gh-pages branch; it runs only from the canonical matrix entry (pixi:
-# "locked"; uv: max Python) and never on pull_request events, so PRs build
-# the docs as a check without touching the published site.
+# the gh-pages branch; it never runs on pull_request events, so PRs build the
+# docs as a check without touching the published site.
 #
 # The calling job must grant the token write access to repository contents:
 #   permissions:
@@ -53,8 +50,13 @@ on:
         type: string
         required: false
         default: ""
+      python-version:
+        description: Python version used on the pip/uv path (ignored with pixi, which uses its lock file)
+        type: string
+        required: false
+        default: "3.13"
       publish:
-        description: Publish the built HTML to GitHub Pages (canonical matrix entry, non-pull_request events only)
+        description: Publish the built HTML to GitHub Pages (non-pull_request events only)
         type: boolean
         required: false
         default: true
@@ -69,15 +71,13 @@ jobs:
       pixi-environment: ${{ steps.detect.outputs.pixi-environment }}
       has-notebooks: ${{ steps.detect.outputs.has-notebooks }}
       extras: ${{ steps.detect.outputs.extras }}
-      matrix-include: ${{ steps.detect.outputs.matrix-include }}
-      publish-label: ${{ steps.detect.outputs.publish-label }}
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v5
 
       # Ubuntu runners ship python3 >= 3.12, so tomllib is available.
-      - name: Detect manager, Sphinx source, notebooks and Python versions
+      - name: Detect manager, Sphinx source and notebooks
         id: detect
         env:
           DOCS_SOURCE_INPUT: ${{ inputs.docs-source }}
@@ -85,7 +85,7 @@ jobs:
           PIXI_ENV_INPUT: ${{ inputs.pixi-environment }}
         run: |
           python3 << 'EOF'
-          import glob, json, os, re, sys
+          import glob, os, sys
           import tomllib
           from pathlib import Path
 
@@ -142,60 +142,21 @@ jobs:
                             "[project.optional-dependencies]; skipping it.")
               extras = [e for e in extras if e in declared]
 
-          # Python versions: min/max of the 3.X trove classifiers (fullmatch,
-          # so bare ":: 3" and ":: 3 :: Only" are ignored), else the
-          # requires-python bounds.
-          minors = sorted(
-              int(m.group(1))
-              for c in project.get("classifiers", [])
-              if (m := re.fullmatch(r"Programming Language :: Python :: 3\.(\d+)",
-                                    c.strip()))
-          )
-          if not minors:
-              spec = project.get("requires-python", "")
-              if lo := re.search(r">=\s*3\.(\d+)", spec):
-                  minors = [int(lo.group(1))]
-                  if ((hi := re.search(r"<\s*3\.(\d+)", spec))
-                          and int(hi.group(1)) - 1 > minors[0]):
-                      minors.append(int(hi.group(1)) - 1)
-          if not minors:
-              print("::error::Cannot determine Python versions: no 'Programming "
-                    "Language :: Python :: 3.X' classifier and no usable "
-                    "requires-python lower bound in pyproject.toml.")
-              sys.exit(1)
-          versions = [f"3.{m}" for m in sorted({minors[0], minors[-1]})]
-
-          # Build matrix: pixi gets a build against the committed pixi.lock
-          # plus fresh solves at min/max Python; uv builds at min/max Python.
-          # Only the canonical entry (publish-label) publishes.
-          include = []
-          if manager == "pixi":
-              include.append({"label": "locked", "python": ""})
-          include += [{"label": v, "python": v} for v in versions]
-          publish_label = "locked" if manager == "pixi" else versions[-1]
-
           print(f"manager: {manager}, docs source: {docs_source}, "
                 f"pixi environment: {pixi_env or '-'}, "
-                f"notebooks: {has_notebooks}, extras: {extras}, "
-                f"matrix: {include}, publish label: {publish_label}")
+                f"notebooks: {has_notebooks}, extras: {extras}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               print(f"manager={manager}", file=out)
               print(f"docs-source={docs_source}", file=out)
               print(f"pixi-environment={pixi_env}", file=out)
               print(f"has-notebooks={str(has_notebooks).lower()}", file=out)
               print(f"extras={','.join(extras)}", file=out)
-              print(f"matrix-include={json.dumps(include)}", file=out)
-              print(f"publish-label={publish_label}", file=out)
           EOF
 
   build:
-    name: Build docs (${{ matrix.label }})
+    name: Build docs
     needs: detect
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.detect.outputs.matrix-include) }}
     env:
       DOCS_SOURCE: ${{ needs.detect.outputs.docs-source }}
       # Command prefix making the notebook and sphinx steps manager-agnostic:
@@ -207,11 +168,11 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v5
 
-      - name: Set up Python ${{ matrix.python }}
+      - name: Set up Python ${{ inputs.python-version }}
         if: needs.detect.outputs.manager == 'uv'
         uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python }}
+          python-version: ${{ inputs.python-version }}
 
       # nbsphinx shells out to the pandoc binary. Installed unconditionally:
       # projects whose pixi environment also ships conda pandoc just get a
@@ -231,32 +192,14 @@ jobs:
           if [ -n "$EXTRAS" ]; then spec=".[$EXTRAS]"; fi
           python -m uv pip install --system "$spec"
 
-      # Locked entry: install the docs environment from the committed
-      # pixi.lock, cached on its hash.
-      - name: Set up pixi (locked)
-        if: needs.detect.outputs.manager == 'pixi' && matrix.label == 'locked'
+      # Install the docs environment from the committed pixi.lock, cached on
+      # its hash.
+      - name: Set up pixi
+        if: needs.detect.outputs.manager == 'pixi'
         uses: prefix-dev/setup-pixi@v0.10.0
         with:
           environments: ${{ needs.detect.outputs.pixi-environment }}
           cache: true
-
-      # Fresh entries: only install the pixi binary; the environment is
-      # solved by the `pixi add` below, so the committed lock must not be
-      # installed (and per-version solves make lock-keyed caching pointless).
-      - name: Set up pixi (fresh solve)
-        if: needs.detect.outputs.manager == 'pixi' && matrix.label != 'locked'
-        uses: prefix-dev/setup-pixi@v0.10.0
-        with:
-          run-install: false
-
-      # Pin the matrix Python in the ephemeral runner manifest and re-solve.
-      # The pin lands in the default feature, which every pixi environment
-      # implicitly includes, so it constrains the docs environment too.
-      # --no-install: the docs environment is installed by its first
-      # `pixi run -e` instead of pointlessly installing the default one.
-      - name: Solve pixi environment with Python ${{ matrix.python }}
-        if: needs.detect.outputs.manager == 'pixi' && matrix.label != 'locked'
-        run: pixi add --no-install "python==${{ matrix.python }}.*"
 
       # In a fresh checkout <docs-source>/*.ipynb only matches the notebooks
       # generated here (built notebooks are gitignored in the projects).
@@ -280,7 +223,7 @@ jobs:
       # which is why the calling job needs `permissions: contents: write`.
       # -n adds .nojekyll, -f force-pushes the rebuilt branch.
       - name: Publish to GitHub Pages
-        if: inputs.publish && github.event_name != 'pull_request' && matrix.label == needs.detect.outputs.publish-label
+        if: inputs.publish && github.event_name != 'pull_request'
         run: |
           python -m pip install ghp-import
           ghp-import -n -p -f "$RUNNER_TEMP/docs_html"
