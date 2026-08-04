@@ -18,10 +18,12 @@
 # committed pyproject.toml — a gitignored local pytest.ini is invisible to CI).
 #
 # Pixi prerequisites: pytest must be available in the *default* pixi
-# environment, and the workspace platforms must include linux-64. The committed
-# pixi.lock is not used: each matrix job pins the matrix Python version with
-# `pixi add` and re-solves the environment, so both ends of the declared
-# support range are actually tested.
+# environment, and the workspace platforms must include linux-64. Pixi
+# projects get one extra matrix entry, "locked", that runs the tests in the
+# environment installed from the committed pixi.lock (the one developers
+# actually use); the min/max entries pin the Python version with `pixi add`
+# and re-solve from scratch, so both ends of the declared support range are
+# actually tested.
 
 name: Tests
 
@@ -46,7 +48,7 @@ jobs:
     outputs:
       manager: ${{ steps.detect.outputs.manager }}
       tests-path: ${{ steps.detect.outputs.tests-path }}
-      python-versions: ${{ steps.detect.outputs.python-versions }}
+      matrix-include: ${{ steps.detect.outputs.matrix-include }}
 
     steps:
       - name: Checkout source code
@@ -120,32 +122,40 @@ jobs:
                         f"({', '.join(candidates)}). Set the tests-path input.")
                   sys.exit(1)
 
+          # Test matrix: pixi projects get a run against the committed
+          # pixi.lock (the environment developers actually use) plus fresh
+          # solves at min/max Python; uv projects run at min/max Python.
+          include = []
+          if manager == "pixi":
+              include.append({"label": "locked", "python": ""})
+          include += [{"label": v, "python": v} for v in versions]
+
           print(f"manager: {manager}, tests path: {tests_path}, "
-                f"python versions: {versions}")
+                f"matrix: {include}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               print(f"manager={manager}", file=out)
               print(f"tests-path={tests_path}", file=out)
-              print(f"python-versions={json.dumps(versions)}", file=out)
+              print(f"matrix-include={json.dumps(include)}", file=out)
           EOF
 
   test:
-    name: Run tests
+    name: Run tests (${{ matrix.label }})
     needs: detect
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ${{ fromJSON(needs.detect.outputs.python-versions) }}
+        include: ${{ fromJSON(needs.detect.outputs.matrix-include) }}
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v5
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python }}
         if: needs.detect.outputs.manager == 'uv'
         uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python }}
 
       # pytest is installed explicitly so that projects not listing it in
       # their dependencies still work.
@@ -156,20 +166,29 @@ jobs:
           python -m pip install uv
           python -m uv pip install --system -r pyproject.toml pytest
 
-      # Only install the pixi binary: the environment is solved by the
-      # `pixi add` below, so the committed lock must not be installed (and
-      # per-version solves make lock-keyed caching pointless).
-      - name: Set up pixi
-        if: needs.detect.outputs.manager == 'pixi'
+      # Locked entry: install the default environment from the committed
+      # pixi.lock (the environment developers actually use), cached on its
+      # hash.
+      - name: Set up pixi (locked)
+        if: needs.detect.outputs.manager == 'pixi' && matrix.label == 'locked'
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          cache: true
+
+      # Fresh entries: only install the pixi binary; the environment is
+      # solved by the `pixi add` below, so the committed lock must not be
+      # installed (and per-version solves make lock-keyed caching pointless).
+      - name: Set up pixi (fresh solve)
+        if: needs.detect.outputs.manager == 'pixi' && matrix.label != 'locked'
         uses: prefix-dev/setup-pixi@v0.10.0
         with:
           run-install: false
 
       # Pixi locks a single Python; pin the matrix version in the ephemeral
       # runner manifest and re-solve + install the default environment.
-      - name: Solve pixi environment with Python ${{ matrix.python-version }}
-        if: needs.detect.outputs.manager == 'pixi'
-        run: pixi add "python==${{ matrix.python-version }}.*"
+      - name: Solve pixi environment with Python ${{ matrix.python }}
+        if: needs.detect.outputs.manager == 'pixi' && matrix.label != 'locked'
+        run: pixi add "python==${{ matrix.python }}.*"
 
       # pytest-args is expanded unquoted so the shell word-splits it
       # (e.g. -m "not gpu" becomes two arguments).

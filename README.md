@@ -227,8 +227,9 @@ Called on push / pull_request, it:
 3. derives the Python matrix from the min and max
    `Programming Language :: Python :: 3.X` classifiers, falling back to the
    `requires-python` bounds (min from `>= 3.X`; max from a `< 3.Y` bound if
-   present, otherwise min only);
-4. runs `pytest <tests-path> -m "not gpu"` on each matrix Python, so tests
+   present, otherwise min only) — pixi projects get one extra "locked" entry
+   running in the environment from the committed `pixi.lock`;
+4. runs `pytest <tests-path> -m "not gpu"` on each matrix entry, so tests
    decorated with `@pytest.mark.gpu` are skipped.
 
 | Input | Default | Description |
@@ -237,11 +238,12 @@ Called on push / pull_request, it:
 | `pytest-args` | `-m "not gpu"` | Arguments passed to pytest |
 
 **Pixi projects:** pytest must be available in the *default* pixi environment,
-and the workspace `platforms` must include `linux-64`. The committed
-`pixi.lock` is not used: each matrix job pins the matrix Python with
-`pixi add "python==3.X.*"` and re-solves the environment, so both ends of the
-declared support range are actually tested — a failure on the minimum version
-usually means the declared range is stale.
+and the workspace `platforms` must include `linux-64`. The "locked" matrix
+entry tests the environment developers actually use (installed from the
+committed `pixi.lock`, cached); the min/max entries pin the Python version
+with `pixi add "python==3.X.*"` and re-solve from scratch, so both ends of
+the declared support range are actually tested — a failure on the minimum
+version usually means the declared range is stale.
 
 ### `docs_github_pages.yml` — build and publish Sphinx docs
 
