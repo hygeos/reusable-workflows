@@ -11,6 +11,8 @@ Available workflows:
   build and verify a Python package before publishing to PyPI
 - [`github_release.yml`](#github_releaseyml--publish-a-github-release-on-tag-push) —
   publish a GitHub release or pre-release on version tag push
+- [`tests.yml`](#testsyml--run-the-project-test-suite) —
+  run the project test suite on its supported Python range
 
 ## Setting up a project
 
@@ -93,6 +95,34 @@ project's `CHANGELOG.md`, follow the
 [expected changelog format](#changelog-format); otherwise GitHub's
 auto-generated notes are used.
 
+### Tests
+
+Save this as `.github/workflows/tests.yml` in the project:
+
+```yaml
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    uses: hygeos/reusable-workflows/.github/workflows/tests.yml@v1
+```
+
+No other setup is needed for most projects: the workflow detects the
+environment manager, the tests directory and the Python versions from
+`pyproject.toml` (see the [reference](#testsyml--run-the-project-test-suite)).
+
+If some tests require a GPU, decorate them with `@pytest.mark.gpu` — they are
+skipped in CI, which runs pytest with `-m "not gpu"` — and register the marker
+in the committed `pyproject.toml` (a gitignored local `pytest.ini` is
+invisible to CI):
+
+```toml
+[tool.pytest.ini_options]
+markers = ["gpu: tests requiring a GPU (skipped in CI)"]
+```
+
 ## Workflow reference
 
 ### `pypi_build.yml` — build and verify a Python package
@@ -154,6 +184,34 @@ Release date: 07-06-2025
 
 If the file or the section is missing, the release is still created with
 auto-generated notes.
+
+### `tests.yml` — run the project test suite
+
+Called on push / pull_request, it:
+
+1. detects the environment manager: **pixi** when `pyproject.toml` has a
+   `[tool.pixi]` section (or a `pixi.toml` exists), otherwise **pip/uv**
+   installing the `[project]` dependencies (plus pytest);
+2. detects the tests directory: `./tests` at the repo root, else a single
+   `<package>/tests` match, else fails asking for the `tests-path` input;
+3. derives the Python matrix from the min and max
+   `Programming Language :: Python :: 3.X` classifiers, falling back to the
+   `requires-python` bounds (min from `>= 3.X`; max from a `< 3.Y` bound if
+   present, otherwise min only);
+4. runs `pytest <tests-path> -m "not gpu"` on each matrix Python, so tests
+   decorated with `@pytest.mark.gpu` are skipped.
+
+| Input | Default | Description |
+|---|---|---|
+| `tests-path` | `""` | Path of the tests directory, relative to the repo root (empty = auto-detect `./tests` or `<package>/tests`) |
+| `pytest-args` | `-m "not gpu"` | Arguments passed to pytest |
+
+**Pixi projects:** pytest must be available in the *default* pixi environment,
+and the workspace `platforms` must include `linux-64`. The committed
+`pixi.lock` is not used: each matrix job pins the matrix Python with
+`pixi add "python==3.X.*"` and re-solves the environment, so both ends of the
+declared support range are actually tested — a failure on the minimum version
+usually means the declared range is stale.
 
 ## Versioning
 

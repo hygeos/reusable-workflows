@@ -1,0 +1,182 @@
+# Reusable workflow: run a project's pytest suite on its supported Python range.
+#
+# Meant to be called from a project's own workflow on push / pull_request. It
+# inspects the project's pyproject.toml and adapts to it:
+#
+#   - Environment manager: pixi (when pyproject.toml has a [tool.pixi] section
+#     or a pixi.toml exists), otherwise pip/uv installing [project]
+#     dependencies.
+#   - Tests directory: ./tests at the repo root, or a single <package>/tests
+#     directory. Overridable with the tests-path input.
+#   - Python versions: the min and max "Programming Language :: Python :: 3.X"
+#     classifiers, with a fallback on the requires-python bounds (min from the
+#     ">= 3.X" bound; max from a "< 3.Y" bound if present, otherwise min only).
+#
+# Tests requiring a GPU are skipped: pytest runs with -m "not gpu", so tests
+# decorated with @pytest.mark.gpu are deselected on the GPU-less runners.
+# Projects should register the marker in [tool.pytest.ini_options] (in the
+# committed pyproject.toml — a gitignored local pytest.ini is invisible to CI).
+#
+# Pixi prerequisites: pytest must be available in the *default* pixi
+# environment, and the workspace platforms must include linux-64. The committed
+# pixi.lock is not used: each matrix job pins the matrix Python version with
+# `pixi add` and re-solves the environment, so both ends of the declared
+# support range are actually tested.
+
+name: Tests
+
+on:
+  workflow_call:
+    inputs:
+      tests-path:
+        description: Path of the tests directory, relative to the repo root (empty = auto-detect ./tests or <package>/tests)
+        type: string
+        required: false
+        default: ""
+      pytest-args:
+        description: Arguments passed to pytest
+        type: string
+        required: false
+        default: '-m "not gpu"'
+
+jobs:
+  detect:
+    name: Detect project configuration
+    runs-on: ubuntu-latest
+    outputs:
+      manager: ${{ steps.detect.outputs.manager }}
+      tests-path: ${{ steps.detect.outputs.tests-path }}
+      python-versions: ${{ steps.detect.outputs.python-versions }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Ubuntu runners ship python3 >= 3.12, so tomllib is available.
+      - name: Detect manager, tests path and Python versions
+        id: detect
+        env:
+          TESTS_PATH_INPUT: ${{ inputs.tests-path }}
+        run: |
+          python3 << 'EOF'
+          import glob, json, os, re, sys
+          import tomllib
+          from pathlib import Path
+
+          with open("pyproject.toml", "rb") as f:
+              data = tomllib.load(f)
+          project = data.get("project", {})
+
+          manager = ("pixi" if "pixi" in data.get("tool", {})
+                     or Path("pixi.toml").is_file() else "uv")
+
+          # Python versions: min/max of the 3.X trove classifiers (fullmatch,
+          # so bare ":: 3" and ":: 3 :: Only" are ignored), else the
+          # requires-python bounds.
+          minors = sorted(
+              int(m.group(1))
+              for c in project.get("classifiers", [])
+              if (m := re.fullmatch(r"Programming Language :: Python :: 3\.(\d+)",
+                                    c.strip()))
+          )
+          if not minors:
+              spec = project.get("requires-python", "")
+              if lo := re.search(r">=\s*3\.(\d+)", spec):
+                  minors = [int(lo.group(1))]
+                  if ((hi := re.search(r"<\s*3\.(\d+)", spec))
+                          and int(hi.group(1)) - 1 > minors[0]):
+                      minors.append(int(hi.group(1)) - 1)
+          if not minors:
+              print("::error::Cannot determine Python versions: no 'Programming "
+                    "Language :: Python :: 3.X' classifier and no usable "
+                    "requires-python lower bound in pyproject.toml.")
+              sys.exit(1)
+          versions = [f"3.{m}" for m in sorted({minors[0], minors[-1]})]
+
+          # Tests directory: input override > ./tests > single */tests match.
+          tests_path = os.environ["TESTS_PATH_INPUT"].strip()
+          if tests_path:
+              if not Path(tests_path).is_dir():
+                  print(f"::error::tests-path input '{tests_path}' is not a "
+                        "directory.")
+                  sys.exit(1)
+          elif Path("tests").is_dir():
+              tests_path = "tests"
+          else:
+              # glob's '*' skips hidden directories (.venv, .pixi, ...)
+              candidates = sorted(
+                  p for p in glob.glob("*/tests")
+                  if Path(p).is_dir()
+                  and Path(p).parent.name not in ("docs", "doc", "build")
+              )
+              if len(candidates) == 1:
+                  tests_path = candidates[0]
+              elif not candidates:
+                  print("::error::No tests directory found (looked for ./tests "
+                        "and <package>/tests). Set the tests-path input.")
+                  sys.exit(1)
+              else:
+                  print("::error::Several candidate tests directories found "
+                        f"({', '.join(candidates)}). Set the tests-path input.")
+                  sys.exit(1)
+
+          print(f"manager: {manager}, tests path: {tests_path}, "
+                f"python versions: {versions}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              print(f"manager={manager}", file=out)
+              print(f"tests-path={tests_path}", file=out)
+              print(f"python-versions={json.dumps(versions)}", file=out)
+          EOF
+
+  test:
+    name: Run tests
+    needs: detect
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(needs.detect.outputs.python-versions) }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        if: needs.detect.outputs.manager == 'uv'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # pytest is installed explicitly so that projects not listing it in
+      # their dependencies still work.
+      - name: Install dependencies with uv
+        if: needs.detect.outputs.manager == 'uv'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          python -m uv pip install --system -r pyproject.toml pytest
+
+      # Only install the pixi binary: the environment is solved by the
+      # `pixi add` below, so the committed lock must not be installed (and
+      # per-version solves make lock-keyed caching pointless).
+      - name: Set up pixi
+        if: needs.detect.outputs.manager == 'pixi'
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          run-install: false
+
+      # Pixi locks a single Python; pin the matrix version in the ephemeral
+      # runner manifest and re-solve + install the default environment.
+      - name: Solve pixi environment with Python ${{ matrix.python-version }}
+        if: needs.detect.outputs.manager == 'pixi'
+        run: pixi add "python==${{ matrix.python-version }}.*"
+
+      # pytest-args is expanded unquoted so the shell word-splits it
+      # (e.g. -m "not gpu" becomes two arguments).
+      - name: Run pytest
+        run: |
+          if [ "${{ needs.detect.outputs.manager }}" = "pixi" ]; then
+            pixi run pytest "${{ needs.detect.outputs.tests-path }}" ${{ inputs.pytest-args }}
+          else
+            python -m pytest "${{ needs.detect.outputs.tests-path }}" ${{ inputs.pytest-args }}
+          fi
