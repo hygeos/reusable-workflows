@@ -50,7 +50,7 @@ jobs:
 
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Ubuntu runners ship python3 >= 3.12, so tomllib is available.
       - name: Detect manager, tests path and Python versions
@@ -139,11 +139,11 @@ jobs:
 
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
         if: needs.detect.outputs.manager == 'uv'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
