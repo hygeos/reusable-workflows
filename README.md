@@ -13,6 +13,8 @@ Available workflows:
   publish a GitHub release or pre-release on version tag push
 - [`tests.yml`](#testsyml--run-the-project-test-suite) —
   run the project test suite on its supported Python range
+- [`ruff.yml`](#ruffyml--lint-the-project-with-ruff) —
+  lint the project with ruff
 - [`docs_github_pages.yml`](#docs_github_pagesyml--build-and-publish-sphinx-docs) —
   build the Sphinx docs and publish them to GitHub Pages
 
@@ -124,6 +126,40 @@ invisible to CI):
 [tool.pytest.ini_options]
 markers = ["gpu: tests requiring a GPU (skipped in CI)"]
 ```
+
+### Linting (ruff)
+
+Save this as `.github/workflows/ruff.yml` in the project:
+
+```yaml
+name: Ruff
+
+on: [push, pull_request]
+
+jobs:
+  ruff:
+    uses: hygeos/reusable-workflows/.github/workflows/ruff.yml@v1
+```
+
+No permissions and no repo settings are needed.
+
+**One-time prerequisite** (per project): ruff must be configured in the
+project, under `[tool.ruff]` in `pyproject.toml` or in a `ruff.toml` /
+`.ruff.toml` at the repo root, for example:
+
+```toml
+[tool.ruff]
+line-length = 79
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B"]
+```
+
+The workflow fails with an explicit error when it finds no configuration,
+instead of falling back on ruff's built-in defaults: the rule set stays owned
+by the project, so CI enforces exactly what developers run locally. Ruff does
+not need to be part of the project's environment — the workflow installs it
+itself.
 
 ### Docs (GitHub Pages)
 
@@ -244,6 +280,42 @@ committed `pixi.lock`, cached); the min/max entries pin the Python version
 with `pixi add "python==3.X.*"` and re-solve from scratch, so both ends of
 the declared support range are actually tested — a failure on the minimum
 version usually means the declared range is stale.
+
+### `ruff.yml` — lint the project with ruff
+
+Called on push / pull_request, it:
+
+1. locates the project's ruff configuration: a `ruff.toml` / `.ruff.toml` at
+   the repo root, else a `[tool.ruff]` section in `pyproject.toml`, else fails
+   asking for ruff to be configured;
+2. installs ruff at the pinned `ruff-version` and logs the resolved version;
+3. runs `ruff check --output-format=github <paths>`, so violations are reported
+   as GitHub annotations, inline on the diff.
+
+| Input | Default | Description |
+|---|---|---|
+| `ruff-version` | `"0.16.*"` | Version specifier of the ruff release installed in CI (empty = latest) |
+| `paths` | `"."` | Paths passed to `ruff check`, relative to the repo root |
+
+**No environment manager detection**, unlike `tests.yml` and
+`docs_github_pages.yml`: ruff is a self-contained static analyzer that reads the
+source tree and never imports the project, so the workflow does not install the
+project and ruff does not need to be in the project's pixi environment or
+dependencies. Files are excluded through ruff's own `exclude` /
+`extend-exclude` settings rather than through the `paths` input.
+
+**Why is `ruff-version` pinned?** A new ruff release can add rules or change
+existing ones, which would turn every project's CI red without any change on
+their side. Pass `ruff-version: ""` in the caller to track the latest release
+instead, or bump the pin here once and all projects follow.
+
+**Only the linter runs**, not the formatter (`ruff format --check`). They are
+independent tools: the formatter treats `line-length` as a fill target rather
+than a ceiling — it re-joins hand-wrapped calls that fit — and it never reflows
+comments or docstrings, so it cannot maintain a `max-doc-length` setting (a
+lint-only rule, `W505`). A project that is `ruff check` clean is therefore
+usually not `ruff format` clean, and enforcing the formatter would mean
+reformatting the existing code first.
 
 ### `docs_github_pages.yml` — build and publish Sphinx docs
 

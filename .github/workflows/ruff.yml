@@ -1,0 +1,115 @@
+# Reusable workflow: lint a project with ruff.
+#
+# Meant to be called from a project's own workflow on push / pull_request. It
+# runs `ruff check` on the checked out tree, so the rules applied are the ones
+# the project declares itself:
+#
+#   - Configuration: a [tool.ruff] section in pyproject.toml, or a ruff.toml /
+#     .ruff.toml at the repo root. The workflow fails when none is found rather
+#     than linting with ruff's built-in defaults, so CI never enforces rules
+#     the project did not choose.
+#   - Paths: the whole repo root by default (ruff honours the exclude /
+#     extend-exclude settings). Overridable with the paths input.
+#
+# Unlike tests.yml and docs_github_pages.yml there is no pixi/uv detection and
+# no project install: ruff is a self-contained static analyzer that reads the
+# source tree and never imports the project, so it does not have to be part of
+# the project's environment.
+#
+# Only the linter runs, not the formatter (`ruff format --check`): the two are
+# independent tools, and the formatter treats line-length as a fill target
+# rather than a ceiling while never reflowing docstrings, so enforcing it would
+# rewrite hand-wrapped code and fight a max-doc-length setting. Adding it would
+# be a separate, deliberate decision.
+#
+# The ruff version is pinned by default: a new release can add rules or change
+# existing ones, which would otherwise turn every project's CI red with no
+# change on their side. Pass an empty ruff-version to track the latest release.
+
+name: Ruff
+
+on:
+  workflow_call:
+    inputs:
+      ruff-version:
+        description: Version specifier of the ruff release installed in CI (empty = latest)
+        type: string
+        required: false
+        default: "0.16.*"
+      paths:
+        description: Paths passed to ruff check, relative to the repo root
+        type: string
+        required: false
+        default: "."
+
+jobs:
+  ruff:
+    name: Lint with ruff
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v5
+
+      # Ubuntu runners ship python3 >= 3.12, so tomllib is available.
+      - name: Verify the project configures ruff
+        run: |
+          python3 << 'EOF'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          # Ruff reads its settings from a dedicated ruff.toml / .ruff.toml, or
+          # from a [tool.ruff] section in pyproject.toml. A dedicated file wins
+          # over pyproject.toml, so it is looked up first.
+          source = None
+          settings = {}
+          dedicated = [n for n in ("ruff.toml", ".ruff.toml")
+                       if Path(n).is_file()]
+          if dedicated:
+              source = dedicated[0]
+              with open(source, "rb") as f:
+                  settings = tomllib.load(f)
+          elif Path("pyproject.toml").is_file():
+              with open("pyproject.toml", "rb") as f:
+                  data = tomllib.load(f)
+              if "ruff" in data.get("tool", {}):
+                  source = "pyproject.toml [tool.ruff]"
+                  settings = data["tool"]["ruff"]
+
+          if source is None:
+              print("::error::No ruff configuration found (looked for a "
+                    "[tool.ruff] section in pyproject.toml, and for ruff.toml "
+                    "and .ruff.toml at the repo root). Configure ruff in the "
+                    "project so that CI enforces the same rules as developers "
+                    "run locally.")
+              sys.exit(1)
+
+          line_length = settings.get("line-length", "ruff default (88)")
+          select = settings.get("lint", {}).get("select",
+                                               settings.get("select"))
+          print(f"config: {source}, line-length: {line_length}, "
+                f"select: {select or 'ruff default'}")
+          EOF
+
+      # Ruff is distributed as a self-contained binary wheel, so no
+      # actions/setup-python step is needed: the runner's python3 is only used
+      # to run pip. `ruff --version` logs what was actually resolved, which
+      # matters when the caller tracks the latest release.
+      - name: Install ruff
+        env:
+          RUFF_VERSION: ${{ inputs.ruff-version }}
+        run: |
+          spec="ruff"
+          if [ -n "$RUFF_VERSION" ]; then spec="ruff==$RUFF_VERSION"; fi
+          python3 -m pip install "$spec"
+          ruff --version
+
+      # --output-format=github emits ::error file=...,line=...,col=... workflow
+      # commands, so violations are surfaced as GitHub annotations instead of
+      # being buried in the log. Ruff writes absolute paths in this format by
+      # design (unlike its other output formats); the message body still starts
+      # with the repo-relative "path:line:col: CODE" prefix, so the log stays
+      # readable either way.
+      - name: Run ruff check
+        run: ruff check --output-format=github "${{ inputs.paths }}"
